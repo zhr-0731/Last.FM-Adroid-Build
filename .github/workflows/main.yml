@@ -63,6 +63,85 @@ jobs:
           echo "BUILD_DIR_ABS=$BUILD_DIR_ABS" >> $GITHUB_ENV
           echo "BUILD_SYSTEM=$BUILD_SYSTEM"   >> $GITHUB_ENV
 
+      # ═══════════════════════════════════════════
+      #  准备 PrivateAPIKey.java（Ant 和 Gradle 都需要）
+      # ═══════════════════════════════════════════
+      - name: Prepare PrivateAPIKey.java
+        run: |
+          echo "=== 打印 README.API_KEY 说明 ==="
+          cat "$BUILD_DIR_ABS/README.API_KEY" 2>/dev/null || true
+          echo ""
+
+          echo "=== 搜索可能的模板文件 ==="
+          find "$BUILD_DIR_ABS" -iname "*PrivateAPIKey*" -type f 2>/dev/null || true
+
+          # 目标文件位置：和 AndroidLastFmServerFactory.java 同目录
+          TARGET_DIR=$(dirname "$(find "$BUILD_DIR_ABS/src" -name 'AndroidLastFmServerFactory.java' -type f | sed -n '1p')")
+          echo "TARGET_DIR=$TARGET_DIR"
+          mkdir -p "$TARGET_DIR"
+          TARGET_FILE="$TARGET_DIR/PrivateAPIKey.java"
+
+          if [ -f "$TARGET_FILE" ]; then
+            echo "PrivateAPIKey.java 已存在，跳过"
+            exit 0
+          fi
+
+          # 优先找模板文件
+          TEMPLATE=$(find "$BUILD_DIR_ABS" \
+                     \( -iname "PrivateAPIKey.java.template" \
+                        -o -iname "PrivateAPIKey.java.sample" \
+                        -o -iname "PrivateAPIKey.java.example" \
+                        -o -iname "PrivateAPIKey.java.dist" \) \
+                     -type f 2>/dev/null | sed -n '1p')
+
+          if [ -n "$TEMPLATE" ] && [ -f "$TEMPLATE" ]; then
+            echo "找到模板：$TEMPLATE"
+            cp "$TEMPLATE" "$TARGET_FILE"
+            echo "=== 模板内容 ==="
+            cat "$TARGET_FILE"
+          else
+            echo "未找到模板，生成占位符文件"
+            # 从源码里探测包名
+            PKG=$(grep -m1 '^package ' "$TARGET_DIR/AndroidLastFmServerFactory.java" \
+                  | sed 's/package //; s/;//' | tr -d ' ')
+            echo "检测到包名：$PKG"
+
+            cat > "$TARGET_FILE" <<EOF
+          package ${PKG};
+
+          /**
+           * 占位符文件，由 GitHub Actions 自动生成。
+           * 真实的 API KEY/SECRET 未开源，编译通过即可，APK 运行时会用占位值。
+           */
+          public class PrivateAPIKey {
+              public static final String KEY          = "00000000000000000000000000000000";
+              public static final String SECRET       = "00000000000000000000000000000000";
+              public static final String ANALYTICS_ID = "UA-00000000-0";
+          }
+          EOF
+
+            # 去掉每行前导空格
+            sed -i 's/^          //' "$TARGET_FILE"
+            echo "=== 生成的内容 ==="
+            cat "$TARGET_FILE"
+          fi
+
+          # 校验是否有编译所需的三个字段
+          for FIELD in KEY SECRET ANALYTICS_ID; do
+            if grep -q "$FIELD" "$TARGET_FILE"; then
+              echo "OK: $FIELD 存在"
+            else
+              echo "::warning::$FIELD 缺失，补充"
+              sed -i "/public class PrivateAPIKey/a\\    public static final String $FIELD = \"0\";" "$TARGET_FILE"
+            fi
+          done
+
+          echo "=== 最终 PrivateAPIKey.java ==="
+          cat "$TARGET_FILE"
+
+      # ═══════════════════════════════════════════
+      #  Gradle 路径（保留兼容）
+      # ═══════════════════════════════════════════
       - name: Set up JDK 17 (Gradle)
         if: env.BUILD_SYSTEM == 'gradle'
         uses: actions/setup-java@v5
@@ -81,6 +160,9 @@ jobs:
           chmod +x gradlew
           ./gradlew assembleRelease --stacktrace
 
+      # ═══════════════════════════════════════════
+      #  Ant 路径
+      # ═══════════════════════════════════════════
       - name: Set up JDK 8 (Ant)
         if: env.BUILD_SYSTEM == 'ant'
         uses: actions/setup-java@v5
@@ -112,12 +194,10 @@ jobs:
           echo "SDK_ROOT=$SDK_ROOT"
           echo "BUILD_DIR_ABS=$BUILD_DIR_ABS"
 
-          # ── 装 ant 和 32 位兼容库（build-tools 19.1 的 aapt 是 32 位） ──
           sudo dpkg --add-architecture i386
           sudo apt-get update -qq
           sudo apt-get install -y ant
 
-          # libncurses5:i386 在不同 Ubuntu 版本包名不同，逐个试，能装多少装多少
           sudo apt-get install -y lib32z1 lib32stdc++6 || true
           sudo apt-get install -y libncurses5:i386    || true
           sudo apt-get install -y libncurses6:i386    || true
@@ -125,9 +205,8 @@ jobs:
 
           echo "=== 检查 32 位 libz ==="
           find /usr/lib /lib -name 'libz.so*' 2>/dev/null | sort || true
-          dpkg -l | grep -E 'lib32z1|libncurses' || true
 
-          # ── 解析 library 依赖 ──
+          # ── library 依赖 ──
           LIB_REF=$(grep -E '^android.library.reference.1=' "$BUILD_DIR_ABS/project.properties" \
                     | cut -d= -f2 | tr -d '\r' || true)
           echo "LIB_REF=$LIB_REF"
@@ -139,8 +218,6 @@ jobs:
               echo "LIB_DIR=$LIB_DIR"
               echo "LIB_DIR=$LIB_DIR" >> $GITHUB_ENV
               echo "sdk.dir=$SDK_ROOT" > "$LIB_DIR/local.properties"
-              echo "=== library project.properties ==="
-              cat "$LIB_DIR/project.properties" 2>/dev/null || true
             else
               echo "::warning::Library 未找到：$LIB_DIR_RAW"
             fi
@@ -166,10 +243,7 @@ jobs:
             unzip -q -o /tmp/p.zip -d /tmp/p_tmp
             local FIRST
             FIRST=$(find /tmp/p_tmp -mindepth 1 -maxdepth 1 -type d | sed -n '1p')
-            if [ -z "$FIRST" ]; then
-              echo "::warning::android-${API} 解压后无目录"
-              return 1
-            fi
+            [ -z "$FIRST" ] && return 1
             mkdir -p "$SDK_ROOT/platforms"
             mv "$FIRST" "$DEST"
             if [ -f "$DEST/android.jar" ]; then
@@ -196,16 +270,10 @@ jobs:
             mv "$FIRST" "$SDK_ROOT/build-tools/19.1.0"
           fi
 
-          # ── 用 ldd 验证 aapt 是否能找到所有动态库 ──
           echo "=== ldd aapt ==="
           ldd "$SDK_ROOT/build-tools/19.1.0/aapt" || true
-          echo "=== 直接运行 aapt ==="
+          echo "=== aapt version ==="
           "$SDK_ROOT/build-tools/19.1.0/aapt" version || true
-
-          echo "=== 已安装的平台 ==="
-          ls "$SDK_ROOT/platforms"
-          echo "=== 已安装的 build-tools ==="
-          ls "$SDK_ROOT/build-tools"
 
       - name: Build APK with Ant
         if: env.BUILD_SYSTEM == 'ant'
