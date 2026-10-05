@@ -63,15 +63,6 @@ jobs:
           echo "BUILD_DIR_ABS=$BUILD_DIR_ABS" >> $GITHUB_ENV
           echo "BUILD_SYSTEM=$BUILD_SYSTEM"   >> $GITHUB_ENV
 
-          echo "=== 构建目录内容 ==="
-          ls -la "$BUILD_DIR_ABS"
-          echo "=== 主工程 project.properties ==="
-          cat "$BUILD_DIR_ABS/project.properties" 2>/dev/null || echo "(无)"
-
-          echo "=== 全盘搜索 library 目录 ==="
-          find /tmp/source -maxdepth 4 -type d -name library -not -path '*/.git*' 2>/dev/null || true
-
-      # ── Gradle 路径（保留兼容） ──
       - name: Set up JDK 17 (Gradle)
         if: env.BUILD_SYSTEM == 'gradle'
         uses: actions/setup-java@v5
@@ -90,7 +81,6 @@ jobs:
           chmod +x gradlew
           ./gradlew assembleRelease --stacktrace
 
-      # ── Ant 路径 ──
       - name: Set up JDK 8 (Ant)
         if: env.BUILD_SYSTEM == 'ant'
         uses: actions/setup-java@v5
@@ -122,10 +112,22 @@ jobs:
           echo "SDK_ROOT=$SDK_ROOT"
           echo "BUILD_DIR_ABS=$BUILD_DIR_ABS"
 
+          # ── 装 ant 和 32 位兼容库（build-tools 19.1 的 aapt 是 32 位） ──
+          sudo dpkg --add-architecture i386
           sudo apt-get update -qq
           sudo apt-get install -y ant
 
-          # ── 解析 library 依赖（绝对路径） ──
+          # libncurses5:i386 在不同 Ubuntu 版本包名不同，逐个试，能装多少装多少
+          sudo apt-get install -y lib32z1 lib32stdc++6 || true
+          sudo apt-get install -y libncurses5:i386    || true
+          sudo apt-get install -y libncurses6:i386    || true
+          sudo apt-get install -y zlib1g:i386         || true
+
+          echo "=== 检查 32 位 libz ==="
+          find /usr/lib /lib -name 'libz.so*' 2>/dev/null | sort || true
+          dpkg -l | grep -E 'lib32z1|libncurses' || true
+
+          # ── 解析 library 依赖 ──
           LIB_REF=$(grep -E '^android.library.reference.1=' "$BUILD_DIR_ABS/project.properties" \
                     | cut -d= -f2 | tr -d '\r' || true)
           echo "LIB_REF=$LIB_REF"
@@ -144,10 +146,9 @@ jobs:
             fi
           fi
 
-          # ── 主工程 local.properties ──
           echo "sdk.dir=$SDK_ROOT" > "$BUILD_DIR_ABS/local.properties"
 
-          # ── 批量安装旧平台（含 library 需要的 android-15） ──
+          # ── 批量安装旧平台 15~19 ──
           install_platform() {
             local API=$1 ZIPFILE=$2
             local DEST="$SDK_ROOT/platforms/android-${API}"
@@ -172,7 +173,7 @@ jobs:
             mkdir -p "$SDK_ROOT/platforms"
             mv "$FIRST" "$DEST"
             if [ -f "$DEST/android.jar" ]; then
-              echo "OK android-${API}: $DEST"
+              echo "OK android-${API}"
             else
               echo "::warning::android-${API} 缺 android.jar"
             fi
@@ -194,8 +195,12 @@ jobs:
             FIRST=$(find /tmp/bt191_tmp -mindepth 1 -maxdepth 1 -type d | sed -n '1p')
             mv "$FIRST" "$SDK_ROOT/build-tools/19.1.0"
           fi
-          echo "=== build-tools/19.1.0 内容 ==="
-          ls "$SDK_ROOT/build-tools/19.1.0" | sed -n '1,40p'
+
+          # ── 用 ldd 验证 aapt 是否能找到所有动态库 ──
+          echo "=== ldd aapt ==="
+          ldd "$SDK_ROOT/build-tools/19.1.0/aapt" || true
+          echo "=== 直接运行 aapt ==="
+          "$SDK_ROOT/build-tools/19.1.0/aapt" version || true
 
           echo "=== 已安装的平台 ==="
           ls "$SDK_ROOT/platforms"
@@ -221,7 +226,6 @@ jobs:
           echo "=== bin/ 内容 ==="
           ls -la bin/ || true
 
-      # ── 定位 APK ──
       - name: Locate built APK
         run: |
           APK_PATH=$(find "$BUILD_DIR_ABS" -name "*.apk" -type f 2>/dev/null | grep -i release | sed -n '1p')
@@ -239,7 +243,6 @@ jobs:
           cp "$APK_PATH" "$GITHUB_WORKSPACE/lastfm-release.apk"
           ls -lh "$GITHUB_WORKSPACE/lastfm-release.apk"
 
-      # ── 上传到仓库 ──
       - name: Commit and push APK to repository
         run: |
           cd "$GITHUB_WORKSPACE"
@@ -256,7 +259,6 @@ jobs:
             git push origin "HEAD:${GITHUB_REF_NAME}"
           fi
 
-      # ── 上传到 Release ──
       - name: Upload APK to Release
         uses: softprops/action-gh-release@v2
         if: github.ref_type == 'tag'
