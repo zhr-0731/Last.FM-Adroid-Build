@@ -38,7 +38,6 @@ jobs:
           7z x "$ZIP_FILE" -aoa
           ls -la
 
-      # ── 统一使用绝对路径，避免 cwd 变化导致解析错误 ──
       - name: Detect build system
         run: |
           cd /tmp/source
@@ -66,14 +65,13 @@ jobs:
 
           echo "=== 构建目录内容 ==="
           ls -la "$BUILD_DIR_ABS"
-          echo "=== project.properties ==="
+          echo "=== 主工程 project.properties ==="
           cat "$BUILD_DIR_ABS/project.properties" 2>/dev/null || echo "(无)"
+
           echo "=== 全盘搜索 library 目录 ==="
           find /tmp/source -maxdepth 4 -type d -name library -not -path '*/.git*' 2>/dev/null || true
 
-      # ═══════════════════════════════════════════
-      #  Gradle 路径（保留兼容）
-      # ═══════════════════════════════════════════
+      # ── Gradle 路径（保留兼容） ──
       - name: Set up JDK 17 (Gradle)
         if: env.BUILD_SYSTEM == 'gradle'
         uses: actions/setup-java@v5
@@ -92,9 +90,7 @@ jobs:
           chmod +x gradlew
           ./gradlew assembleRelease --stacktrace
 
-      # ═══════════════════════════════════════════
-      #  Ant 路径（本项目实际使用）
-      # ═══════════════════════════════════════════
+      # ── Ant 路径 ──
       - name: Set up JDK 8 (Ant)
         if: env.BUILD_SYSTEM == 'ant'
         uses: actions/setup-java@v5
@@ -129,7 +125,7 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y ant
 
-          # ── library 解析（基于绝对路径） ──
+          # ── 解析 library 依赖（绝对路径） ──
           LIB_REF=$(grep -E '^android.library.reference.1=' "$BUILD_DIR_ABS/project.properties" \
                     | cut -d= -f2 | tr -d '\r' || true)
           echo "LIB_REF=$LIB_REF"
@@ -141,8 +137,8 @@ jobs:
               echo "LIB_DIR=$LIB_DIR"
               echo "LIB_DIR=$LIB_DIR" >> $GITHUB_ENV
               echo "sdk.dir=$SDK_ROOT" > "$LIB_DIR/local.properties"
-              echo "=== library 目录内容 ==="
-              ls -la "$LIB_DIR" | sed -n '1,20p'
+              echo "=== library project.properties ==="
+              cat "$LIB_DIR/project.properties" 2>/dev/null || true
             else
               echo "::warning::Library 未找到：$LIB_DIR_RAW"
             fi
@@ -150,53 +146,61 @@ jobs:
 
           # ── 主工程 local.properties ──
           echo "sdk.dir=$SDK_ROOT" > "$BUILD_DIR_ABS/local.properties"
-          cat "$BUILD_DIR_ABS/local.properties"
 
-          # ── 手动安装 platforms;android-16 ──
-          echo "=== 手动安装 platforms;android-16 ==="
-          rm -rf "$SDK_ROOT/platforms/android-16" /tmp/android16_tmp
-          wget -q https://dl.google.com/android/repository/android-16_r05.zip -O /tmp/android16.zip
-          mkdir -p /tmp/android16_tmp
-          unzip -q -o /tmp/android16.zip -d /tmp/android16_tmp
-          echo "=== 解压后顶层 ==="
-          ls -la /tmp/android16_tmp/
+          # ── 批量安装旧平台（含 library 需要的 android-15） ──
+          install_platform() {
+            local API=$1 ZIPFILE=$2
+            local DEST="$SDK_ROOT/platforms/android-${API}"
+            if [ -d "$DEST" ]; then
+              echo "android-${API} 已安装"
+              return 0
+            fi
+            echo ">>> 安装 android-${API}"
+            wget -q "https://dl.google.com/android/repository/${ZIPFILE}" -O /tmp/p.zip || {
+              echo "::warning::下载 android-${API} 失败"
+              return 1
+            }
+            rm -rf /tmp/p_tmp
+            mkdir -p /tmp/p_tmp
+            unzip -q -o /tmp/p.zip -d /tmp/p_tmp
+            local FIRST
+            FIRST=$(find /tmp/p_tmp -mindepth 1 -maxdepth 1 -type d | sed -n '1p')
+            if [ -z "$FIRST" ]; then
+              echo "::warning::android-${API} 解压后无目录"
+              return 1
+            fi
+            mkdir -p "$SDK_ROOT/platforms"
+            mv "$FIRST" "$DEST"
+            if [ -f "$DEST/android.jar" ]; then
+              echo "OK android-${API}: $DEST"
+            else
+              echo "::warning::android-${API} 缺 android.jar"
+            fi
+          }
 
-          # zip 里顶层目录叫 android-4.1.2，需要直接改名为 android-16
-          mv /tmp/android16_tmp/android-4.1.2 "$SDK_ROOT/platforms/android-16"
-
-          echo "=== android-16 目录内容 ==="
-          ls -la "$SDK_ROOT/platforms/android-16" | sed -n '1,30p'
-
-          if [ -f "$SDK_ROOT/platforms/android-16/android.jar" ]; then
-            echo "OK: android.jar found"
-          else
-            echo "::error::android.jar 缺失"
-            exit 1
-          fi
+          install_platform 15 android-15_r05.zip
+          install_platform 16 android-16_r05.zip
+          install_platform 17 android-17_r03.zip
+          install_platform 18 android-18_r03.zip
+          install_platform 19 android-19_r04.zip
 
           # ── 手动安装 build-tools;19.1.0 ──
-          echo "=== 手动安装 build-tools;19.1.0 ==="
-          rm -rf "$SDK_ROOT/build-tools/19.1.0" /tmp/bt191_tmp
-          wget -q https://dl.google.com/android/repository/build-tools_r19.1-linux.zip -O /tmp/bt191.zip
-          mkdir -p /tmp/bt191_tmp
-          unzip -q -o /tmp/bt191.zip -d /tmp/bt191_tmp
-          echo "=== 解压后顶层 ==="
-          ls -la /tmp/bt191_tmp/
-
-          # build-tools r19.1 的 zip 顶层目录叫 android-4.4W
-          if [ -d /tmp/bt191_tmp/android-4.4W ]; then
-            mv /tmp/bt191_tmp/android-4.4W "$SDK_ROOT/build-tools/19.1.0"
-          else
-            FIRST_DIR=$(find /tmp/bt191_tmp -mindepth 1 -maxdepth 1 -type d | sed -n '1p')
-            mv "$FIRST_DIR" "$SDK_ROOT/build-tools/19.1.0"
+          if [ ! -d "$SDK_ROOT/build-tools/19.1.0" ]; then
+            echo ">>> 安装 build-tools 19.1.0"
+            rm -rf /tmp/bt191_tmp
+            wget -q https://dl.google.com/android/repository/build-tools_r19.1-linux.zip -O /tmp/bt191.zip
+            mkdir -p /tmp/bt191_tmp
+            unzip -q -o /tmp/bt191.zip -d /tmp/bt191_tmp
+            FIRST=$(find /tmp/bt191_tmp -mindepth 1 -maxdepth 1 -type d | sed -n '1p')
+            mv "$FIRST" "$SDK_ROOT/build-tools/19.1.0"
           fi
           echo "=== build-tools/19.1.0 内容 ==="
-          ls -la "$SDK_ROOT/build-tools/19.1.0" | sed -n '1,40p'
+          ls "$SDK_ROOT/build-tools/19.1.0" | sed -n '1,40p'
 
           echo "=== 已安装的平台 ==="
-          ls "$SDK_ROOT/platforms" || true
+          ls "$SDK_ROOT/platforms"
           echo "=== 已安装的 build-tools ==="
-          ls "$SDK_ROOT/build-tools" || true
+          ls "$SDK_ROOT/build-tools"
 
       - name: Build APK with Ant
         if: env.BUILD_SYSTEM == 'ant'
@@ -205,20 +209,10 @@ jobs:
           SDK_ROOT="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
           export PATH="$SDK_ROOT/tools:$SDK_ROOT/platform-tools:$PATH"
 
-          echo "=== 验证 android 命令 ==="
+          echo "=== android 命令 ==="
           which android || echo "android not in PATH"
 
-          # 如果 library 存在，先构建它
-          if [ -n "$LIB_DIR" ] && [ -d "$LIB_DIR" ]; then
-            echo "=== 构建 library: $LIB_DIR ==="
-            (cd "$LIB_DIR" && ant release -Dsdk.buildtools=19.1.0) \
-              || (cd "$LIB_DIR" && ant debug -Dsdk.buildtools=19.1.0) \
-              || true
-          else
-            echo "=== library 不存在或未解析，跳过 ==="
-          fi
-
-          echo "=== ant release ==="
+          echo "=== ant release -Dsdk.buildtools=19.1.0 ==="
           ant release -Dsdk.buildtools=19.1.0 || {
             echo "=== release 失败，尝试 debug ==="
             ant debug -Dsdk.buildtools=19.1.0
@@ -227,9 +221,7 @@ jobs:
           echo "=== bin/ 内容 ==="
           ls -la bin/ || true
 
-      # ═══════════════════════════════════════════
-      #  定位 APK
-      # ═══════════════════════════════════════════
+      # ── 定位 APK ──
       - name: Locate built APK
         run: |
           APK_PATH=$(find "$BUILD_DIR_ABS" -name "*.apk" -type f 2>/dev/null | grep -i release | sed -n '1p')
@@ -247,9 +239,7 @@ jobs:
           cp "$APK_PATH" "$GITHUB_WORKSPACE/lastfm-release.apk"
           ls -lh "$GITHUB_WORKSPACE/lastfm-release.apk"
 
-      # ═══════════════════════════════════════════
-      #  上传到仓库（git pull → commit → push）
-      # ═══════════════════════════════════════════
+      # ── 上传到仓库 ──
       - name: Commit and push APK to repository
         run: |
           cd "$GITHUB_WORKSPACE"
@@ -266,9 +256,7 @@ jobs:
             git push origin "HEAD:${GITHUB_REF_NAME}"
           fi
 
-      # ═══════════════════════════════════════════
-      #  上传到发行版（Release）
-      # ═══════════════════════════════════════════
+      # ── 上传到 Release ──
       - name: Upload APK to Release
         uses: softprops/action-gh-release@v2
         if: github.ref_type == 'tag'
