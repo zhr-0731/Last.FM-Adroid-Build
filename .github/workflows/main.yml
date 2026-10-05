@@ -7,113 +7,164 @@ on:
       - 'v*'
 
 permissions:
-  contents: write     # 提交回仓库 + 上传 Release 都需要写权限
+  contents: write
 
 jobs:
   build:
     runs-on: ubuntu-latest
 
     steps:
-      # ── 先检出当前 GitHub 仓库（用于后面提交 APK） ──
       - name: Checkout current repo
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      # ── 第一步：克隆 GitCode 仓库 ──
       - name: Clone GitCode repository
         run: |
           git clone https://gitcode.com/zhr-0731/Last.FM.git /tmp/source
           ls -la /tmp/source/
 
-      # ── 第二步：解压压缩包 ──
       - name: Extract archive
         run: |
           cd /tmp/source
           ZIP_FILE=$(find . -maxdepth 2 -name "*.zip" | head -1)
-          if [ -n "$ZIP_FILE" ]; then
-            echo "Found: $ZIP_FILE"
-            7z x "$ZIP_FILE" -aoa
-          else
-            echo "No .zip found, listing:"
-            ls -R
+          if [ -z "$ZIP_FILE" ]; then
+            echo "No zip found"
+            ls -la
             exit 1
           fi
+          echo "Found: $ZIP_FILE"
+          7z x "$ZIP_FILE" -aoa
           ls -la
 
-      # ── 第三步：定位 Android 源码目录与 gradlew ──
-      - name: Locate Android source and Gradle wrapper
+      # ── 探测构建系统（避免 SIGPIPE，改用 sed -n） ──
+      - name: Detect build system
         run: |
           cd /tmp/source
-          echo "=== 目录结构（2 层） ==="
-          find . -maxdepth 2 -type d -not -path './.git*' | sort
 
-          # 用户指定的 Android 源码路径：lastfm-android-RELEASE_1.9.6/app
-          APP_DIR=$(find . -maxdepth 4 -type d -name "app" \
-                    -path "*lastfm-android-RELEASE*" | head -1)
-          echo "APP_DIR=$APP_DIR"
+          GRADLEW=$(find . -maxdepth 5 -name gradlew -type f -not -path './.git*' 2>/dev/null | sed -n '1p')
+          BUILD_XML=$(find . -maxdepth 5 -name build.xml -type f -not -path './.git*' 2>/dev/null | sed -n '1p')
 
-          # 自动探测 gradlew 所在目录作为构建根目录
-          if [ -n "$APP_DIR" ] && [ -f "$APP_DIR/gradlew" ]; then
-            BUILD_DIR="$APP_DIR"
+          echo "GRADLEW=$GRADLEW"
+          echo "BUILD_XML=$BUILD_XML"
+
+          if [ -n "$GRADLEW" ]; then
+            BUILD_DIR=$(dirname "$GRADLEW")
+            BUILD_SYSTEM=gradle
+          elif [ -n "$BUILD_XML" ]; then
+            BUILD_DIR=$(dirname "$BUILD_XML")
+            BUILD_SYSTEM=ant
           else
-            BUILD_DIR=$(dirname "$(find . -maxdepth 4 -name gradlew -type f | head -1)")
-          fi
-          echo "BUILD_DIR=$BUILD_DIR"
-
-          # 兜底：如果还是找不到，打印完整树再退出，方便排查
-          if [ -z "$BUILD_DIR" ] || [ "$BUILD_DIR" = "." ]; then
-            echo "错误：未找到 gradlew，完整目录如下："
-            find . -not -path './.git*' | head -120
+            echo "::error::无法识别构建系统（既没有 gradlew 也没有 build.xml）"
+            ls -la
             exit 1
           fi
 
-          echo "APP_DIR=$APP_DIR"   >> $GITHUB_ENV
-          echo "BUILD_DIR=$BUILD_DIR" >> $GITHUB_ENV
+          echo "BUILD_DIR=$BUILD_DIR"
+          echo "BUILD_SYSTEM=$BUILD_SYSTEM"
+          echo "BUILD_DIR=$BUILD_DIR"       >> $GITHUB_ENV
+          echo "BUILD_SYSTEM=$BUILD_SYSTEM" >> $GITHUB_ENV
 
-          echo "=== gradlew 所在目录 ==="
-          ls -la "$BUILD_DIR" | head -30
+          echo "=== 构建目录内容 ==="
+          ls -la "$BUILD_DIR"
+          echo "=== project.properties ==="
+          cat "$BUILD_DIR/project.properties" 2>/dev/null || echo "(无)"
 
-      # ── 第四步：编译 APK ──
-      - name: Set up JDK 17
+      # ── Gradle 路径 ──
+      - name: Set up JDK 17 (Gradle)
+        if: env.BUILD_SYSTEM == 'gradle'
         uses: actions/setup-java@v5
         with:
           distribution: 'temurin'
           java-version: '17'
 
       - name: Setup Gradle
+        if: env.BUILD_SYSTEM == 'gradle'
         uses: gradle/actions/setup-gradle@v4
 
-      - name: Grant execute permission for gradlew
-        run: chmod +x /tmp/source/${{ env.BUILD_DIR }}/gradlew
-
-      - name: Build Release APK
+      - name: Build APK with Gradle
+        if: env.BUILD_SYSTEM == 'gradle'
         working-directory: /tmp/source/${{ env.BUILD_DIR }}
-        run: ./gradlew assembleRelease --stacktrace
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleRelease --stacktrace
 
+      # ── Ant 路径（2014 年老项目） ──
+      - name: Set up JDK 8 (Ant)
+        if: env.BUILD_SYSTEM == 'ant'
+        uses: actions/setup-java@v5
+        with:
+          distribution: 'temurin'
+          java-version: '8'
+
+      - name: Prepare Ant environment
+        if: env.BUILD_SYSTEM == 'ant'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y ant
+
+          cd /tmp/source/${{ env.BUILD_DIR }}
+
+          echo "sdk.dir=$ANDROID_HOME" > local.properties
+          echo "=== local.properties ==="
+          cat local.properties
+
+          echo "=== project.properties ==="
+          cat project.properties || true
+
+          # 从 project.properties 提取 target（例如 android-19），安装对应平台
+          TARGET=$(grep -E '^target=' project.properties | cut -d= -f2 | tr -d '\r' || true)
+          echo "TARGET=$TARGET"
+
+          SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          if [ -x "$SDKMANAGER" ] && [ -n "$TARGET" ]; then
+            yes | "$SDKMANAGER" --licenses >/dev/null 2>&1 || true
+            "$SDKMANAGER" "platforms;$TARGET"        || true
+            "$SDKMANAGER" "build-tools;19.1.0"       || true
+            "$SDKMANAGER" "platform-tools"           || true
+          fi
+
+      - name: Build APK with Ant
+        if: env.BUILD_SYSTEM == 'ant'
+        working-directory: /tmp/source/${{ env.BUILD_DIR }}
+        run: |
+          echo "=== 尝试 ant release ==="
+          ant release || {
+            echo "=== release 失败，尝试 ant debug ==="
+            ant debug
+          }
+          echo "=== bin/ 内容 ==="
+          ls -la bin/ || true
+
+      # ── 统一：定位 APK ──
       - name: Locate built APK
         run: |
           cd /tmp/source
-          APK_PATH=$(find "${{ env.BUILD_DIR }}" -name "*.apk" -path "*release*" | head -1)
+
+          # 优先 release，其次任意 apk
+          APK_PATH=$(find "${{ env.BUILD_DIR }}" -name "*.apk" -type f 2>/dev/null | grep -i release | sed -n '1p')
           if [ -z "$APK_PATH" ]; then
-            echo "未找到 release APK，列出所有 apk："
-            find . -name "*.apk"
+            APK_PATH=$(find "${{ env.BUILD_DIR }}" -name "*.apk" -type f 2>/dev/null | sed -n '1p')
+          fi
+
+          if [ -z "$APK_PATH" ]; then
+            echo "::error::未找到任何 APK"
+            find "${{ env.BUILD_DIR }}" -name "*.apk" 2>/dev/null || true
             exit 1
           fi
+
           echo "Found APK: $APK_PATH"
           cp "$APK_PATH" "$GITHUB_WORKSPACE/lastfm-release.apk"
           ls -lh "$GITHUB_WORKSPACE/lastfm-release.apk"
 
-      # ── 第五步 A：上传到仓库（git pull → commit → push） ──
+      # ── 上传到仓库（git pull → commit → push） ──
       - name: Commit and push APK to repository
         run: |
           cd "$GITHUB_WORKSPACE"
-
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-          # 先拉取远端最新，避免 non-fast-forward 被拒
           git pull --rebase origin "${GITHUB_REF_NAME}"
 
           git add lastfm-release.apk
@@ -124,7 +175,7 @@ jobs:
             git push origin "HEAD:${GITHUB_REF_NAME}"
           fi
 
-      # ── 第五步 B：上传到 Release ──
+      # ── 上传到 Release ──
       - name: Upload APK to Release
         uses: softprops/action-gh-release@v2
         if: github.ref_type == 'tag'
