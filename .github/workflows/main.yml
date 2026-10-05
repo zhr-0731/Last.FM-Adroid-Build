@@ -31,12 +31,10 @@ jobs:
           ZIP_FILE=$(find . -maxdepth 2 -name "*.zip" | head -1)
           if [ -z "$ZIP_FILE" ]; then
             echo "No zip found"
-            ls -la
             exit 1
           fi
           echo "Found: $ZIP_FILE"
           7z x "$ZIP_FILE" -aoa
-          ls -la
 
       - name: Detect build system
         run: |
@@ -55,53 +53,52 @@ jobs:
             exit 1
           fi
 
-          echo "BUILD_DIR_ABS=$BUILD_DIR_ABS"
-          echo "BUILD_SYSTEM=$BUILD_SYSTEM"
           echo "BUILD_DIR_ABS=$BUILD_DIR_ABS" >> $GITHUB_ENV
           echo "BUILD_SYSTEM=$BUILD_SYSTEM"   >> $GITHUB_ENV
 
+      # ═══════════════════════════════════════════
+      #  从 secrets 注入 API Key
+      # ═══════════════════════════════════════════
       - name: Prepare PrivateAPIKey.java
         run: |
           TARGET_DIR=$(dirname "$(find "$BUILD_DIR_ABS/src" -name 'AndroidLastFmServerFactory.java' -type f | sed -n '1p')")
           mkdir -p "$TARGET_DIR"
           TARGET_FILE="$TARGET_DIR/PrivateAPIKey.java"
 
-          if [ -f "$TARGET_FILE" ]; then
-            echo "PrivateAPIKey.java 已存在"
-            exit 0
+          API_KEY="${{ secrets.LASTFM_API_KEY }}"
+          API_SECRET="${{ secrets.LASTFM_API_SECRET }}"
+          ANALYTICS_ID="${{ secrets.LASTFM_ANALYTICS_ID }}"
+
+          [ -z "$API_KEY" ]      && API_KEY="00000000000000000000000000000000"
+          [ -z "$API_SECRET" ]   && API_SECRET="00000000000000000000000000000000"
+          [ -z "$ANALYTICS_ID" ] && ANALYTICS_ID="UA-00000000-0"
+
+          if [ "$API_KEY" = "00000000000000000000000000000000" ]; then
+            echo "::warning::LASTFM_API_KEY 未配置，将生成占位符（应用无法联网登录）"
+          else
+            echo "OK: 使用 secrets 中的 API key（长度 ${#API_KEY}）"
           fi
 
-          TEMPLATE=$(find "$BUILD_DIR_ABS" \
-                     \( -iname "PrivateAPIKey.java.template" \
-                        -o -iname "PrivateAPIKey.java.sample" \
-                        -o -iname "PrivateAPIKey.java.example" \
-                        -o -iname "PrivateAPIKey.java.dist" \) \
-                     -type f 2>/dev/null | sed -n '1p')
+          PKG=$(grep -m1 '^package ' "$TARGET_DIR/AndroidLastFmServerFactory.java" \
+                | sed 's/package //; s/;//' | tr -d ' ')
 
-          if [ -n "$TEMPLATE" ] && [ -f "$TEMPLATE" ]; then
-            cp "$TEMPLATE" "$TARGET_FILE"
-          else
-            PKG=$(grep -m1 '^package ' "$TARGET_DIR/AndroidLastFmServerFactory.java" \
-                  | sed 's/package //; s/;//' | tr -d ' ')
-
-            cat > "$TARGET_FILE" <<EOF
+          cat > "$TARGET_FILE" <<EOF
           package ${PKG};
 
           public class PrivateAPIKey {
-              public static final String KEY          = "00000000000000000000000000000000";
-              public static final String SECRET       = "00000000000000000000000000000000";
-              public static final String ANALYTICS_ID = "UA-00000000-0";
+              public static final String KEY          = "${API_KEY}";
+              public static final String SECRET       = "${API_SECRET}";
+              public static final String ANALYTICS_ID = "${ANALYTICS_ID}";
           }
           EOF
-            sed -i 's/^          //' "$TARGET_FILE"
-          fi
+          sed -i 's/^          //' "$TARGET_FILE"
 
+          echo "=== PrivateAPIKey.java ==="
           cat "$TARGET_FILE"
 
       - name: Patch AndroidManifest.xml targetSdkVersion to 23
         run: |
           cd "$BUILD_DIR_ABS"
-          grep -n 'uses-sdk' AndroidManifest.xml || echo "(无 uses-sdk 标签)"
 
           python3 << 'PYEOF'
           import re
@@ -123,10 +120,9 @@ jobs:
                                content, count=1)
           with open(path, 'w', encoding='utf-8') as f:
               f.write(content)
-          print("patched OK")
           PYEOF
 
-          grep -n 'uses-sdk' AndroidManifest.xml || echo "(未找到)"
+          grep -n 'uses-sdk' AndroidManifest.xml || true
 
       - name: Set up JDK 17 (Gradle)
         if: env.BUILD_SYSTEM == 'gradle'
@@ -165,8 +161,6 @@ jobs:
 
           wget -q https://dl.google.com/android/repository/tools_r25.2.5-linux.zip -O /tmp/tools.zip
           unzip -q -o /tmp/tools.zip -d "$SDK_ROOT"
-
-          ls -la "$SDK_ROOT/tools/ant/build.xml"
 
       - name: Prepare Ant environment
         if: env.BUILD_SYSTEM == 'ant'
@@ -223,8 +217,6 @@ jobs:
             mv "$FIRST" "$SDK_ROOT/build-tools/19.1.0"
           fi
 
-          "$SDK_ROOT/build-tools/19.1.0/aapt" version || true
-
       - name: Generate debug keystore and ant.properties
         if: env.BUILD_SYSTEM == 'ant'
         run: |
@@ -233,9 +225,7 @@ jobs:
 
           keytool -genkeypair -v \
             -keystore "$KEYSTORE" \
-            -storepass android \
-            -alias androiddebugkey \
-            -keypass android \
+            -storepass android -alias androiddebugkey -keypass android \
             -keyalg RSA -keysize 2048 -validity 10000 \
             -dname "CN=Android Debug,O=Android,C=US"
 
@@ -265,9 +255,7 @@ jobs:
       - name: Verify APK signature
         run: |
           APK_PATH=$(find "$BUILD_DIR_ABS" -name "*.apk" -type f 2>/dev/null | grep -i release | sed -n '1p')
-          if [ -z "$APK_PATH" ]; then
-            APK_PATH=$(find "$BUILD_DIR_ABS" -name "*.apk" -type f 2>/dev/null | sed -n '1p')
-          fi
+          [ -z "$APK_PATH" ] && APK_PATH=$(find "$BUILD_DIR_ABS" -name "*.apk" -type f 2>/dev/null | sed -n '1p')
 
           if [ -z "$APK_PATH" ]; then
             echo "::error::未找到任何 APK"
@@ -282,14 +270,8 @@ jobs:
             exit 1
           }
 
-          unzip -l "$APK_PATH" | grep -i "META-INF" || true
-
           cp "$APK_PATH" "$GITHUB_WORKSPACE/lastfm-release.apk"
-          ls -lh "$GITHUB_WORKSPACE/lastfm-release.apk"
 
-      # ═══════════════════════════════════════════
-      #  唯一修复点：加 --autostash
-      # ═══════════════════════════════════════════
       - name: Commit and push APK to repository
         run: |
           cd "$GITHUB_WORKSPACE"
