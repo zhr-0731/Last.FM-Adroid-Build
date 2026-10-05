@@ -74,6 +74,9 @@ jobs:
           echo "=== project.properties ==="
           cat "$BUILD_DIR/project.properties" 2>/dev/null || echo "(无)"
 
+          echo "=== 全盘搜索可能存在的 library 目录 ==="
+          find . -maxdepth 4 -type d -name library -not -path './.git*' 2>/dev/null || true
+
       # ═══════════════════════════════════════════
       #  Gradle 路径（保留兼容）
       # ═══════════════════════════════════════════
@@ -115,7 +118,6 @@ jobs:
           echo "=== 当前 SDK 根目录内容 ==="
           ls -la
 
-          # 只有存在 tools/ 才备份（新版 SDK 已无此目录）
           if [ -d tools ]; then
             echo "=== 备份已有 tools ==="
             mv tools tools_backup_$(date +%s)
@@ -152,17 +154,28 @@ jobs:
           TARGET=$(grep -E '^target=' project.properties | cut -d= -f2 | tr -d '\r' || true)
           echo "TARGET=$TARGET"
 
-          # 从 project.properties 提取 library reference
+          # ── 处理 library 依赖（可选，找不到不报错） ──
+          PROJECT_ROOT=$(dirname "${{ env.BUILD_DIR }}")
+          echo "PROJECT_ROOT=$PROJECT_ROOT"
+
           LIB_REF=$(grep -E '^android.library.reference.1=' project.properties | cut -d= -f2 | tr -d '\r' || true)
           echo "LIB_REF=$LIB_REF"
+
           if [ -n "$LIB_REF" ]; then
-            LIB_DIR=$(cd "$(dirname "${{ env.BUILD_DIR }}")/$LIB_REF" && pwd)
-            echo "LIB_DIR=$LIB_DIR"
-            echo "LIB_DIR=$LIB_DIR" >> $GITHUB_ENV
-            ls -la "$LIB_DIR" | sed -n '1,20p'
+            LIB_DIR_RAW="$PROJECT_ROOT/$LIB_REF"
+            if [ -d "$LIB_DIR_RAW" ]; then
+              LIB_DIR=$(cd "$LIB_DIR_RAW" && pwd)
+              echo "LIB_DIR=$LIB_DIR"
+              echo "LIB_DIR=$LIB_DIR" >> $GITHUB_ENV
+              ls -la "$LIB_DIR" | sed -n '1,20p'
+            else
+              echo "::warning::Library '$LIB_REF' 不存在（解析为 $LIB_DIR_RAW），跳过 library 构建"
+              echo "=== 同级目录列表（找找 library 是否被改名或缺失） ==="
+              ls -la "$PROJECT_ROOT" | sed -n '1,40p'
+            fi
           fi
 
-          # 安装目标平台和 build-tools
+          # ── 安装目标平台和 build-tools ──
           SDKMANAGER="$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager"
           if [ ! -x "$SDKMANAGER" ]; then
             SDKMANAGER=$(find "$SDK_ROOT" -name sdkmanager -type f 2>/dev/null | sed -n '1p')
@@ -193,14 +206,16 @@ jobs:
           echo "=== 验证 android 命令 ==="
           which android || echo "android not in PATH"
 
-          # 先构建依赖的 library 工程
-          if [ -n "$LIB_DIR" ]; then
+          # 如果 library 存在，先构建它
+          if [ -n "$LIB_DIR" ] && [ -d "$LIB_DIR" ]; then
             echo "=== 构建 library: $LIB_DIR ==="
             cd "$LIB_DIR"
             echo "sdk.dir=$SDK_ROOT" > local.properties
             cat project.properties || true
             ant release || ant debug || true
             cd -
+          else
+            echo "=== library 不存在或未解析，跳过 ==="
           fi
 
           echo "=== 尝试 ant release ==="
