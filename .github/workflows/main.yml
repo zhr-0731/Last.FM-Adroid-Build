@@ -38,7 +38,6 @@ jobs:
           7z x "$ZIP_FILE" -aoa
           ls -la
 
-      # ── 探测构建系统（避免 SIGPIPE，改用 sed -n） ──
       - name: Detect build system
         run: |
           cd /tmp/source
@@ -56,7 +55,7 @@ jobs:
             BUILD_DIR=$(dirname "$BUILD_XML")
             BUILD_SYSTEM=ant
           else
-            echo "::error::无法识别构建系统（既没有 gradlew 也没有 build.xml）"
+            echo "::error::无法识别构建系统"
             ls -la
             exit 1
           fi
@@ -71,7 +70,7 @@ jobs:
           echo "=== project.properties ==="
           cat "$BUILD_DIR/project.properties" 2>/dev/null || echo "(无)"
 
-      # ── Gradle 路径 ──
+      # ── Gradle 路径（本项目的 app/ 虽无 gradlew，但保留兼容） ──
       - name: Set up JDK 17 (Gradle)
         if: env.BUILD_SYSTEM == 'gradle'
         uses: actions/setup-java@v5
@@ -90,13 +89,33 @@ jobs:
           chmod +x gradlew
           ./gradlew assembleRelease --stacktrace
 
-      # ── Ant 路径（2014 年老项目） ──
+      # ── Ant 路径（本项目实际使用） ──
       - name: Set up JDK 8 (Ant)
         if: env.BUILD_SYSTEM == 'ant'
         uses: actions/setup-java@v5
         with:
           distribution: 'temurin'
           java-version: '8'
+
+      - name: Install legacy Android SDK Tools 25.2.5
+        if: env.BUILD_SYSTEM == 'ant'
+        run: |
+          # SDK Tools 25.3.0+ 移除了 tools/ant/build.xml，需降级
+          cd /usr/local/lib/android/sdk
+
+          echo "=== 备份当前 tools ==="
+          mv tools tools_backup
+
+          echo "=== 下载并解压旧版 SDK Tools 25.2.5 ==="
+          wget -q https://dl.google.com/android/repository/tools_r25.2.5-linux.zip -O /tmp/tools_r25.2.5-linux.zip
+          unzip -q /tmp/tools_r25.2.5-linux.zip -d /usr/local/lib/android/sdk/
+
+          echo "=== 验证 ant/build.xml ==="
+          ls -la /usr/local/lib/android/sdk/tools/ant/build.xml
+
+          echo "=== 恢复 platform-tools 和 build-tools 软链接 ==="
+          # 新版 SDK 的 platform-tools/build-tools 仍在，确保 PATH 可用
+          export PATH="$ANDROID_HOME/tools:$ANDROID_HOME/platform-tools:$PATH"
 
       - name: Prepare Ant environment
         if: env.BUILD_SYSTEM == 'ant'
@@ -106,29 +125,34 @@ jobs:
 
           cd /tmp/source/${{ env.BUILD_DIR }}
 
-          echo "sdk.dir=$ANDROID_HOME" > local.properties
+          echo "sdk.dir=/usr/local/lib/android/sdk" > local.properties
           echo "=== local.properties ==="
           cat local.properties
 
           echo "=== project.properties ==="
           cat project.properties || true
 
-          # 从 project.properties 提取 target（例如 android-19），安装对应平台
           TARGET=$(grep -E '^target=' project.properties | cut -d= -f2 | tr -d '\r' || true)
           echo "TARGET=$TARGET"
 
+          # 安装项目所需的 SDK 平台和 build-tools
           SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
-          if [ -x "$SDKMANAGER" ] && [ -n "$TARGET" ]; then
+          if [ -x "$SDKMANAGER" ]; then
             yes | "$SDKMANAGER" --licenses >/dev/null 2>&1 || true
-            "$SDKMANAGER" "platforms;$TARGET"        || true
-            "$SDKMANAGER" "build-tools;19.1.0"       || true
-            "$SDKMANAGER" "platform-tools"           || true
+            if [ -n "$TARGET" ]; then
+              "$SDKMANAGER" "platforms;$TARGET" || true
+            fi
+            "$SDKMANAGER" "build-tools;19.1.0" || true
+            "$SDKMANAGER" "platform-tools" || true
           fi
 
       - name: Build APK with Ant
         if: env.BUILD_SYSTEM == 'ant'
         working-directory: /tmp/source/${{ env.BUILD_DIR }}
         run: |
+          export PATH="/usr/local/lib/android/sdk/tools:/usr/local/lib/android/sdk/platform-tools:$PATH"
+          echo "=== 验证 android 命令 ==="
+          which android || echo "android not in PATH"
           echo "=== 尝试 ant release ==="
           ant release || {
             echo "=== release 失败，尝试 ant debug ==="
@@ -142,7 +166,6 @@ jobs:
         run: |
           cd /tmp/source
 
-          # 优先 release，其次任意 apk
           APK_PATH=$(find "${{ env.BUILD_DIR }}" -name "*.apk" -type f 2>/dev/null | grep -i release | sed -n '1p')
           if [ -z "$APK_PATH" ]; then
             APK_PATH=$(find "${{ env.BUILD_DIR }}" -name "*.apk" -type f 2>/dev/null | sed -n '1p')
@@ -158,7 +181,6 @@ jobs:
           cp "$APK_PATH" "$GITHUB_WORKSPACE/lastfm-release.apk"
           ls -lh "$GITHUB_WORKSPACE/lastfm-release.apk"
 
-      # ── 上传到仓库（git pull → commit → push） ──
       - name: Commit and push APK to repository
         run: |
           cd "$GITHUB_WORKSPACE"
@@ -175,7 +197,6 @@ jobs:
             git push origin "HEAD:${GITHUB_REF_NAME}"
           fi
 
-      # ── 上传到 Release ──
       - name: Upload APK to Release
         uses: softprops/action-gh-release@v2
         if: github.ref_type == 'tag'
