@@ -60,17 +60,9 @@ jobs:
           echo "BUILD_DIR_ABS=$BUILD_DIR_ABS" >> $GITHUB_ENV
           echo "BUILD_SYSTEM=$BUILD_SYSTEM"   >> $GITHUB_ENV
 
-      # ═══════════════════════════════════════════
-      #  准备 PrivateAPIKey.java
-      # ═══════════════════════════════════════════
       - name: Prepare PrivateAPIKey.java
         run: |
-          echo "=== README.API_KEY ==="
-          cat "$BUILD_DIR_ABS/README.API_KEY" 2>/dev/null || true
-          echo ""
-
           TARGET_DIR=$(dirname "$(find "$BUILD_DIR_ABS/src" -name 'AndroidLastFmServerFactory.java' -type f | sed -n '1p')")
-          echo "TARGET_DIR=$TARGET_DIR"
           mkdir -p "$TARGET_DIR"
           TARGET_FILE="$TARGET_DIR/PrivateAPIKey.java"
 
@@ -104,54 +96,38 @@ jobs:
             sed -i 's/^          //' "$TARGET_FILE"
           fi
 
-          echo "=== PrivateAPIKey.java ==="
           cat "$TARGET_FILE"
 
-      # ═══════════════════════════════════════════
-      #  修补 AndroidManifest.xml 的 targetSdkVersion
-      # ═══════════════════════════════════════════
       - name: Patch AndroidManifest.xml targetSdkVersion to 23
         run: |
           cd "$BUILD_DIR_ABS"
-          echo "=== 修改前 ==="
           grep -n 'uses-sdk' AndroidManifest.xml || echo "(无 uses-sdk 标签)"
 
           python3 << 'PYEOF'
-          import re, os
-
+          import re
           path = 'AndroidManifest.xml'
           with open(path, 'r', encoding='utf-8') as f:
               content = f.read()
-
           target = '23'
-
           if '<uses-sdk' in content:
               if 'android:targetSdkVersion' in content:
                   content = re.sub(r'android:targetSdkVersion="[^"]*"',
                                    f'android:targetSdkVersion="{target}"', content)
               else:
-                  # 在 <uses-sdk ... /> 里追加 targetSdkVersion
                   content = re.sub(r'(<uses-sdk\b[^/>]*)(/?>)',
                                    rf'\1 android:targetSdkVersion="{target}"\2',
                                    content, count=1)
           else:
-              # 完全没有 uses-sdk，插一个
               content = re.sub(r'(<manifest\b[^>]*>)',
                                rf'\1\n    <uses-sdk android:minSdkVersion="7" android:targetSdkVersion="{target}" />',
                                content, count=1)
-
           with open(path, 'w', encoding='utf-8') as f:
               f.write(content)
-
           print("patched OK")
           PYEOF
 
-          echo "=== 修改后 ==="
           grep -n 'uses-sdk' AndroidManifest.xml || echo "(未找到)"
 
-      # ═══════════════════════════════════════════
-      #  Gradle 路径
-      # ═══════════════════════════════════════════
       - name: Set up JDK 17 (Gradle)
         if: env.BUILD_SYSTEM == 'gradle'
         uses: actions/setup-java@v5
@@ -170,9 +146,6 @@ jobs:
           chmod +x gradlew
           ./gradlew assembleRelease --stacktrace
 
-      # ═══════════════════════════════════════════
-      #  Ant 路径
-      # ═══════════════════════════════════════════
       - name: Set up JDK 8 (Ant)
         if: env.BUILD_SYSTEM == 'ant'
         uses: actions/setup-java@v5
@@ -184,7 +157,6 @@ jobs:
         if: env.BUILD_SYSTEM == 'ant'
         run: |
           SDK_ROOT="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
-          echo "SDK_ROOT=$SDK_ROOT"
           cd "$SDK_ROOT"
 
           if [ -d tools ]; then
@@ -200,56 +172,40 @@ jobs:
         if: env.BUILD_SYSTEM == 'ant'
         run: |
           SDK_ROOT="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
-          echo "SDK_ROOT=$SDK_ROOT"
-          echo "BUILD_DIR_ABS=$BUILD_DIR_ABS"
 
           sudo dpkg --add-architecture i386
           sudo apt-get update -qq
           sudo apt-get install -y ant
-
           sudo apt-get install -y lib32z1 lib32stdc++6 || true
           sudo apt-get install -y libncurses5:i386    || true
           sudo apt-get install -y libncurses6:i386    || true
           sudo apt-get install -y zlib1g:i386         || true
 
-          # ── library 依赖 ──
           LIB_REF=$(grep -E '^android.library.reference.1=' "$BUILD_DIR_ABS/project.properties" \
                     | cut -d= -f2 | tr -d '\r' || true)
-          echo "LIB_REF=$LIB_REF"
 
           if [ -n "$LIB_REF" ]; then
             LIB_DIR_RAW="$BUILD_DIR_ABS/$LIB_REF"
             if [ -d "$LIB_DIR_RAW" ]; then
               LIB_DIR=$(cd "$LIB_DIR_RAW" && pwd)
-              echo "LIB_DIR=$LIB_DIR"
               echo "LIB_DIR=$LIB_DIR" >> $GITHUB_ENV
               echo "sdk.dir=$SDK_ROOT" > "$LIB_DIR/local.properties"
-            else
-              echo "::warning::Library 未找到：$LIB_DIR_RAW"
             fi
           fi
 
           echo "sdk.dir=$SDK_ROOT" > "$BUILD_DIR_ABS/local.properties"
 
-          # ── 批量安装旧平台 15~19 ──
           install_platform() {
             local API=$1 ZIPFILE=$2
             local DEST="$SDK_ROOT/platforms/android-${API}"
-            if [ -d "$DEST" ]; then
-              echo "android-${API} 已安装"
-              return 0
-            fi
-            echo ">>> 安装 android-${API}"
+            [ -d "$DEST" ] && return 0
             wget -q "https://dl.google.com/android/repository/${ZIPFILE}" -O /tmp/p.zip || return 1
-            rm -rf /tmp/p_tmp
-            mkdir -p /tmp/p_tmp
+            rm -rf /tmp/p_tmp; mkdir -p /tmp/p_tmp
             unzip -q -o /tmp/p.zip -d /tmp/p_tmp
-            local FIRST
-            FIRST=$(find /tmp/p_tmp -mindepth 1 -maxdepth 1 -type d | sed -n '1p')
+            local FIRST=$(find /tmp/p_tmp -mindepth 1 -maxdepth 1 -type d | sed -n '1p')
             [ -z "$FIRST" ] && return 1
             mkdir -p "$SDK_ROOT/platforms"
             mv "$FIRST" "$DEST"
-            [ -f "$DEST/android.jar" ] && echo "OK android-${API}" || echo "::warning::android-${API} 缺 android.jar"
           }
 
           install_platform 15 android-15_r05.zip
@@ -258,7 +214,6 @@ jobs:
           install_platform 18 android-18_r03.zip
           install_platform 19 android-19_r04.zip
 
-          # ── 手动安装 build-tools;19.1.0 ──
           if [ ! -d "$SDK_ROOT/build-tools/19.1.0" ]; then
             rm -rf /tmp/bt191_tmp
             wget -q https://dl.google.com/android/repository/build-tools_r19.1-linux.zip -O /tmp/bt191.zip
@@ -268,21 +223,14 @@ jobs:
             mv "$FIRST" "$SDK_ROOT/build-tools/19.1.0"
           fi
 
-          echo "=== aapt version ==="
           "$SDK_ROOT/build-tools/19.1.0/aapt" version || true
 
-      # ═══════════════════════════════════════════
-      #  生成 debug keystore 并写 ant.properties
-      # ═══════════════════════════════════════════
       - name: Generate debug keystore and ant.properties
         if: env.BUILD_SYSTEM == 'ant'
         run: |
           KEYSTORE=/tmp/debug.keystore
-
-          # 删除已存在（避免交互提示）
           rm -f "$KEYSTORE"
 
-          # 用 JDK 8 的 keytool 生成（build-tools 19.1 只认 v1 签名，JDK 8 刚好）
           keytool -genkeypair -v \
             -keystore "$KEYSTORE" \
             -storepass android \
@@ -291,24 +239,14 @@ jobs:
             -keyalg RSA -keysize 2048 -validity 10000 \
             -dname "CN=Android Debug,O=Android,C=US"
 
-          echo "=== keystore 已生成 ==="
-          ls -la "$KEYSTORE"
-
-          # 写入 ant.properties，ant release 会自动用它签名
           cat > "$BUILD_DIR_ABS/ant.properties" <<EOF
           key.store=$KEYSTORE
           key.alias=androiddebugkey
           key.store.password=android
           key.alias.password=android
           EOF
-
-          # 去掉缩进
           sed -i 's/^          //' "$BUILD_DIR_ABS/ant.properties"
 
-          echo "=== ant.properties ==="
-          cat "$BUILD_DIR_ABS/ant.properties"
-
-          # 如果 library 也存在，也给它加 ant.properties
           if [ -n "$LIB_DIR" ] && [ -d "$LIB_DIR" ]; then
             cp "$BUILD_DIR_ABS/ant.properties" "$LIB_DIR/ant.properties"
           fi
@@ -320,19 +258,12 @@ jobs:
           SDK_ROOT="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
           export PATH="$SDK_ROOT/tools:$SDK_ROOT/platform-tools:$PATH"
 
-          echo "=== ant release -Dsdk.buildtools=19.1.0 ==="
           ant release -Dsdk.buildtools=19.1.0
 
-          echo "=== bin/ 内容 ==="
           ls -la bin/ || true
 
-      # ═══════════════════════════════════════════
-      #  校验 APK 签名
-      # ═══════════════════════════════════════════
       - name: Verify APK signature
         run: |
-          SDK_ROOT="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
-
           APK_PATH=$(find "$BUILD_DIR_ABS" -name "*.apk" -type f 2>/dev/null | grep -i release | sed -n '1p')
           if [ -z "$APK_PATH" ]; then
             APK_PATH=$(find "$BUILD_DIR_ABS" -name "*.apk" -type f 2>/dev/null | sed -n '1p')
@@ -340,34 +271,32 @@ jobs:
 
           if [ -z "$APK_PATH" ]; then
             echo "::error::未找到任何 APK"
-            find "$BUILD_DIR_ABS" -name "*.apk" 2>/dev/null || true
             exit 1
           fi
 
           echo "Found APK: $APK_PATH"
           ls -lh "$APK_PATH"
 
-          # 用 jarsigner 校验（JDK 自带，比 apksigner 更兼容老 APK）
-          echo "=== jarsigner -verify ==="
           jarsigner -verify "$APK_PATH" || {
             echo "::error::APK 未签名或签名无效"
             exit 1
           }
 
-          # 检查 META-INF 下有没有签名文件
-          echo "=== META-INF 签名文件 ==="
           unzip -l "$APK_PATH" | grep -i "META-INF" || true
 
           cp "$APK_PATH" "$GITHUB_WORKSPACE/lastfm-release.apk"
           ls -lh "$GITHUB_WORKSPACE/lastfm-release.apk"
 
+      # ═══════════════════════════════════════════
+      #  唯一修复点：加 --autostash
+      # ═══════════════════════════════════════════
       - name: Commit and push APK to repository
         run: |
           cd "$GITHUB_WORKSPACE"
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-          git pull --rebase origin "${GITHUB_REF_NAME}"
+          git pull --rebase --autostash origin "${GITHUB_REF_NAME}"
 
           git add lastfm-release.apk
           if git diff --cached --quiet; then
