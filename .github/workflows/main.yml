@@ -18,10 +18,10 @@ jobs:
       - name: Checkout current repo
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0          # 需要完整历史，便于 pull
+          fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      # ── 第一步：克隆 GitCode 仓库到临时目录 ──
+      # ── 第一步：克隆 GitCode 仓库 ──
       - name: Clone GitCode repository
         run: |
           git clone https://gitcode.com/zhr-0731/Last.FM.git /tmp/source
@@ -42,17 +42,42 @@ jobs:
           fi
           ls -la
 
-      # ── 第三步：定位 Android 源码目录 ──
-      - name: Locate Android source
+      # ── 第三步：定位 Android 源码目录与 gradlew ──
+      - name: Locate Android source and Gradle wrapper
         run: |
           cd /tmp/source
-          APP_DIR=$(find . -maxdepth 3 -type d -name "lastfm-android-RELEASE*" | head -1)
-          echo "Found Android dir: $APP_DIR"
-          echo "APP_DIR=$APP_DIR" >> $GITHUB_ENV
+          echo "=== 目录结构（2 层） ==="
+          find . -maxdepth 2 -type d -not -path './.git*' | sort
+
+          # 用户指定的 Android 源码路径：lastfm-android-RELEASE_1.9.6/app
+          APP_DIR=$(find . -maxdepth 4 -type d -name "app" \
+                    -path "*lastfm-android-RELEASE*" | head -1)
+          echo "APP_DIR=$APP_DIR"
+
+          # 自动探测 gradlew 所在目录作为构建根目录
+          if [ -n "$APP_DIR" ] && [ -f "$APP_DIR/gradlew" ]; then
+            BUILD_DIR="$APP_DIR"
+          else
+            BUILD_DIR=$(dirname "$(find . -maxdepth 4 -name gradlew -type f | head -1)")
+          fi
+          echo "BUILD_DIR=$BUILD_DIR"
+
+          # 兜底：如果还是找不到，打印完整树再退出，方便排查
+          if [ -z "$BUILD_DIR" ] || [ "$BUILD_DIR" = "." ]; then
+            echo "错误：未找到 gradlew，完整目录如下："
+            find . -not -path './.git*' | head -120
+            exit 1
+          fi
+
+          echo "APP_DIR=$APP_DIR"   >> $GITHUB_ENV
+          echo "BUILD_DIR=$BUILD_DIR" >> $GITHUB_ENV
+
+          echo "=== gradlew 所在目录 ==="
+          ls -la "$BUILD_DIR" | head -30
 
       # ── 第四步：编译 APK ──
       - name: Set up JDK 17
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: 'temurin'
           java-version: '17'
@@ -60,35 +85,37 @@ jobs:
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
 
-      - name: Grant execute permission
-        run: chmod +x /tmp/source/${{ env.APP_DIR }}/gradlew
+      - name: Grant execute permission for gradlew
+        run: chmod +x /tmp/source/${{ env.BUILD_DIR }}/gradlew
 
       - name: Build Release APK
-        working-directory: /tmp/source/${{ env.APP_DIR }}
+        working-directory: /tmp/source/${{ env.BUILD_DIR }}
         run: ./gradlew assembleRelease --stacktrace
 
       - name: Locate built APK
         run: |
           cd /tmp/source
-          APK_PATH=$(find "$APP_DIR" -name "*.apk" -path "*release*" | head -1)
+          APK_PATH=$(find "${{ env.BUILD_DIR }}" -name "*.apk" -path "*release*" | head -1)
+          if [ -z "$APK_PATH" ]; then
+            echo "未找到 release APK，列出所有 apk："
+            find . -name "*.apk"
+            exit 1
+          fi
           echo "Found APK: $APK_PATH"
-          # 复制到当前仓库工作区，重命名后入库
           cp "$APK_PATH" "$GITHUB_WORKSPACE/lastfm-release.apk"
           ls -lh "$GITHUB_WORKSPACE/lastfm-release.apk"
 
-      # ── 第五步 A：上传到仓库（git pull + commit + push） ──
+      # ── 第五步 A：上传到仓库（git pull → commit → push） ──
       - name: Commit and push APK to repository
         run: |
           cd "$GITHUB_WORKSPACE"
 
-          # 配置 git 身份
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-          # 先拉取远端最新，避免推送被拒
+          # 先拉取远端最新，避免 non-fast-forward 被拒
           git pull --rebase origin "${GITHUB_REF_NAME}"
 
-          # 暂存并提交 APK
           git add lastfm-release.apk
           if git diff --cached --quiet; then
             echo "APK 无变化，跳过提交"
