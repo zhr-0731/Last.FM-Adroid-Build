@@ -3,12 +3,16 @@ name: Build & Push Finale APK
 on:
   push:
     tags:
-      - 'v*'          # 推送版本标签时触发（如 v5.1.3+53）
-  workflow_dispatch:   # 支持手动触发
+      - 'v*'
+  workflow_dispatch:
 
 jobs:
   build-apk:
     runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        working-directory: ./android      # ← 关键：所有 run 步骤默认在此目录执行
 
     steps:
       # 1. 克隆源码
@@ -19,35 +23,37 @@ jobs:
       - name: Set up Flutter
         uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.47.0'   # 与 pubspec.yaml 中的要求一致[reference:0]
+          flutter-version: '3.47.0'
           channel: 'stable'
 
       # 3. 安装依赖
       - name: Install dependencies
         run: flutter pub get
 
-      # 4. 运行代码生成（build_runner）
+      # 4. 代码生成
       - name: Run build_runner
         run: flutter pub run build_runner build --delete-conflicting-outputs
 
-      # 5. 编译 APK（release）
+      # 5. 编译 APK
       - name: Build APK
         run: flutter build apk --release
 
-      # 6. 按命名格式重命名 APK
+      # 6. 读取版本号并重命名 APK（产物移到仓库根目录）
       - name: Rename APK
         run: |
           VERSION=$(grep '^version:' pubspec.yaml | sed 's/version: //' | tr -d ' ')
           mv build/app/outputs/flutter-apk/app-release.apk \
-             "Finale-${VERSION}-Flutter.apk"
+             "../Finale-${VERSION}-Flutter.apk"
+          echo "APK_NAME=Finale-${VERSION}-Flutter.apk" >> $GITHUB_ENV
 
-      # 7. 提交并推送 APK 到仓库
+      # 7. 提交并推送（注意：这两步要在仓库根目录执行）
       - name: Commit and push APK
+        working-directory: .              # ← 覆盖 defaults，回到仓库根
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add "Finale-*.apk"
-          git commit -m "Add APK build: Finale-${VERSION}-Flutter.apk"
+          git commit -m "Add APK build: ${APK_NAME}"
           git push
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
