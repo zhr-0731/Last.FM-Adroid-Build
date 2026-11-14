@@ -1,59 +1,64 @@
 name: Build & Push Finale APK
 
 on:
-  push:
-    tags:
-      - 'v*'
-  workflow_dispatch:
+  workflow_dispatch: # 支持手动在页面上点击运行
 
 jobs:
-  build-apk:
+  build-and-push:
     runs-on: ubuntu-latest
 
-    defaults:
-      run:
-        working-directory: ./android      # ← 关键：所有 run 步骤默认在此目录执行
-
     steps:
-      # 1. 克隆源码
-      - name: Checkout source code
+      # 1. 检出你自己的仓库（用于最后 Push APK）
+      - name: Checkout your repository
         uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
 
-      # 2. 设置 Flutter 环境
+      # 2. 克隆官方源码到系统临时目录（不污染你的仓库）
+      - name: Clone source code to temp dir
+        run: |
+          cd ${{ runner.temp }}
+          git clone https://github.com/nrubin29/finale.git finale-src
+          cd finale-src
+          # 如果你想专门编译 v5.1.3+53 版本，取消下面这行的注释：
+          # git checkout v5.1.3+53
+
+      # 3. 设置 Flutter 环境
       - name: Set up Flutter
         uses: subosito/flutter-action@v2
         with:
           flutter-version: '3.47.0'
           channel: 'stable'
 
-      # 3. 安装依赖
-      - name: Install dependencies
-        run: flutter pub get
-
-      # 4. 代码生成
-      - name: Run build_runner
-        run: flutter pub run build_runner build --delete-conflicting-outputs
-
-      # 5. 编译 APK
+      # 4. 编译 APK（在临时目录中操作）
       - name: Build APK
-        run: flutter build apk --release
-
-      # 6. 读取版本号并重命名 APK（产物移到仓库根目录）
-      - name: Rename APK
         run: |
-          VERSION=$(grep '^version:' pubspec.yaml | sed 's/version: //' | tr -d ' ')
-          mv build/app/outputs/flutter-apk/app-release.apk \
-             "../Finale-${VERSION}-Flutter.apk"
-          echo "APK_NAME=Finale-${VERSION}-Flutter.apk" >> $GITHUB_ENV
+          cd ${{ runner.temp }}/finale-src
+          flutter pub get
+          flutter pub run build_runner build --delete-conflicting-outputs
+          flutter build apk --release
 
-      # 7. 提交并推送（注意：这两步要在仓库根目录执行）
+      # 5. 提取版本号、重命名并复制回你的仓库根目录
+      - name: Copy and Rename APK
+        run: |
+          cd ${{ runner.temp }}/finale-src
+          # 提取源码中的版本号
+          VERSION=$(grep '^version:' pubspec.yaml | sed 's/version: //' | tr -d ' ')
+          
+          # 将产物复制到你的仓库根目录 (${{ github.workspace }})
+          cp build/app/outputs/flutter-apk/app-release.apk ${{ github.workspace }}/Finale-${VERSION}-Flutter.apk
+          
+          # 将版本号存入环境变量，供下一步使用
+          echo "APP_VERSION=${VERSION}" >> $GITHUB_ENV
+
+      # 6. 提交并推送 APK 到你的仓库
       - name: Commit and push APK
-        working-directory: .              # ← 覆盖 defaults，回到仓库根
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add "Finale-*.apk"
-          git commit -m "Add APK build: ${APK_NAME}"
+          
+          git commit -m "Add APK build: Finale-${{ env.APP_VERSION }}-Flutter.apk" || echo "No changes to commit"
           git push
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
