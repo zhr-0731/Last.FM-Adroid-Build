@@ -35,14 +35,23 @@ jobs:
         run: |
           cd ${{ runner.temp }}/finale-src
           
-          # 生成 env.dart
+          # 1. 生成 env.dart 并注入密钥
           cp lib/env_sample.dart lib/env.dart
-          
-          # 只注入 Last.fm 的 Key 和 Secret，其余保持原样（空值）
           sed -i "s|^const apiKey = .*|const apiKey = '${{ secrets.LASTFM_API_KEY }}';|g" lib/env.dart
           sed -i "s|^const apiSecret = .*|const apiSecret = '${{ secrets.LASTFM_API_SECRET }}';|g" lib/env.dart
           
-          # 编译
+          # 2. 【修复签名报错】动态生成 keystore 和 key.properties
+          echo "生成临时签名文件..."
+          keytool -genkey -v -keystore ${{ runner.temp }}/release.jks -keyalg RSA -keysize 2048 -validity 10000 -alias upload -storepass 123456 -keypass 123456 -dname "CN=Android Debug,O=Android,C=US"
+          
+          cat > android/key.properties <<EOF
+          storePassword=123456
+          keyPassword=123456
+          keyAlias=upload
+          storeFile=${{ runner.temp }}/release.jks
+          EOF
+          
+          # 3. 编译
           flutter pub get
           flutter pub run build_runner build
           flutter build apk --release
@@ -66,7 +75,6 @@ jobs:
           if git diff --cached --quiet; then
             echo "APK 无变化，跳过提交"
           else
-            # 为了满足你最初的命名要求，这里命名后缀我改成了 Scrobbler，你也可以改回 Flutter
             git commit -m "Auto-build: Finale-${{ env.APP_VERSION }}-Scrobbler.apk (build ${GITHUB_RUN_NUMBER})"
             git push origin "HEAD:${GITHUB_REF_NAME}"
           fi
