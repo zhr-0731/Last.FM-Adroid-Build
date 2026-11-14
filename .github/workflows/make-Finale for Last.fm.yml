@@ -1,64 +1,72 @@
-name: Build & Push Finale APK
+name: Build Finale (Scrobbler Only)
 
 on:
-  workflow_dispatch: # 支持手动在页面上点击运行
+  workflow_dispatch: # 支持手动点击运行
+
+permissions:
+  contents: write
 
 jobs:
-  build-and-push:
+  build-finale:
     runs-on: ubuntu-latest
 
     steps:
-      # 1. 检出你自己的仓库（用于最后 Push APK）
-      - name: Checkout your repository
+      - name: Checkout current repo
         uses: actions/checkout@v4
         with:
+          fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      # 2. 克隆官方源码到系统临时目录（不污染你的仓库）
       - name: Clone source code to temp dir
         run: |
           cd ${{ runner.temp }}
           git clone https://github.com/nrubin29/finale.git finale-src
           cd finale-src
-          # 如果你想专门编译 v5.1.3+53 版本，取消下面这行的注释：
-          # git checkout v5.1.3+53
+          git fetch --tags
+          git checkout v5.1.3+53
 
-      # 3. 设置 Flutter 环境
       - name: Set up Flutter
         uses: subosito/flutter-action@v2
         with:
           flutter-version: '3.47.0'
           channel: 'stable'
 
-      # 4. 编译 APK（在临时目录中操作）
-      - name: Build APK
+      - name: Build APK with Last.fm Keys
         run: |
           cd ${{ runner.temp }}/finale-src
+          
+          # 生成 env.dart
+          cp lib/env_sample.dart lib/env.dart
+          
+          # 只注入 Last.fm 的 Key 和 Secret，其余保持原样（空值）
+          sed -i "s|^const apiKey = .*|const apiKey = '${{ secrets.LASTFM_API_KEY }}';|g" lib/env.dart
+          sed -i "s|^const apiSecret = .*|const apiSecret = '${{ secrets.LASTFM_API_SECRET }}';|g" lib/env.dart
+          
+          # 编译
           flutter pub get
-          flutter pub run build_runner build --delete-conflicting-outputs
+          flutter pub run build_runner build
           flutter build apk --release
 
-      # 5. 提取版本号、重命名并复制回你的仓库根目录
       - name: Copy and Rename APK
         run: |
           cd ${{ runner.temp }}/finale-src
-          # 提取源码中的版本号
           VERSION=$(grep '^version:' pubspec.yaml | sed 's/version: //' | tr -d ' ')
-          
-          # 将产物复制到你的仓库根目录 (${{ github.workspace }})
-          cp build/app/outputs/flutter-apk/app-release.apk ${{ github.workspace }}/Finale-${VERSION}-Flutter.apk
-          
-          # 将版本号存入环境变量，供下一步使用
+          cp build/app/outputs/flutter-apk/app-release.apk ${{ github.workspace }}/Finale-${VERSION}-Scrobbler.apk
           echo "APP_VERSION=${VERSION}" >> $GITHUB_ENV
 
-      # 6. 提交并推送 APK 到你的仓库
       - name: Commit and push APK
         run: |
-          git config user.name "github-actions[bot]"
+          cd "$GITHUB_WORKSPACE"
+          git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git pull --rebase --autostash origin "${GITHUB_REF_NAME}" || true
+
           git add "Finale-*.apk"
-          
-          git commit -m "Add APK build: Finale-${{ env.APP_VERSION }}-Flutter.apk" || echo "No changes to commit"
-          git push
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          if git diff --cached --quiet; then
+            echo "APK 无变化，跳过提交"
+          else
+            # 为了满足你最初的命名要求，这里命名后缀我改成了 Scrobbler，你也可以改回 Flutter
+            git commit -m "Auto-build: Finale-${{ env.APP_VERSION }}-Scrobbler.apk (build ${GITHUB_RUN_NUMBER})"
+            git push origin "HEAD:${GITHUB_REF_NAME}"
+          fi
